@@ -1,0 +1,525 @@
+#!/bin/bash
+# rq — research queue for Claude CLI
+# Single-script version. Copy to work machine, put on PATH.
+#
+# Setup:
+#   chmod +x rq
+#   rq init        # creates ~/claude-research/ with all needed files
+#   rq start       # launches tmux session
+#
+# Usage:
+#   rq idea "question"           # add interactive task (#i)
+#   rq idea "question" "#a"     # add auto task
+#   rq add "question"            # suggest auto task (#a)
+#   rq approve 003 | all         # approve suggestions
+#   rq reject 003                # remove suggestion
+#   rq launch                    # run all #a tasks in background
+#   rq research "question"       # open interactive tmux pane
+#   rq resume 003                # resume stuck task in tmux
+#   rq rerun 003                 # requeue for next launch
+#   rq stuck                     # list [>] tasks
+#   rq archive                   # move [x] to ## Done
+#   rq report 003                # print a task report
+#   rq list                      # print tasks.md
+#   rq suggested                 # list pending suggestions
+#   rq rgrep "term"              # search all research files
+#   rq rollup [date]             # quick task summary
+#   rq daily [date]              # Haiku-generated rollup
+
+set -euo pipefail
+
+BASE="${CLAUDE_RESEARCH_DIR:-$HOME/claude-research}"
+TASKS_FILE="${BASE}/tasks.md"
+TASKS_DIR="${BASE}/tasks"
+CLAUDE_MD="${BASE}/CLAUDE.md"
+LOG="${BASE}/batch.log"
+SESSION="rq"
+MAX_JOBS="${MAX_JOBS:-4}"
+
+ts() { date +"%Y-%m-%d"; }
+
+next_number() {
+  local max=0
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^\-\ \[.\]\ ([0-9]{3})\  ]]; then
+      local num=$((10#${BASH_REMATCH[1]}))
+      (( num > max )) && max=$num
+    fi
+  done < "$TASKS_FILE"
+  printf "%03d" $((max + 1))
+}
+
+make_task_dir() {
+  local num="$1"
+  local text="$2"
+  local slug=$(echo "$text" | tr '[:upper:]' '[:lower:]' | tr ' ' '_' | tr -cd '[:alnum:]_' | head -c 40)
+  local dir="${TASKS_DIR}/${num}_${slug}"
+  mkdir -p "${dir}/${num}_data"
+  echo "$dir"
+}
+
+find_task_dir() {
+  find "$TASKS_DIR" -maxdepth 1 -type d -name "${1}_*" 2>/dev/null | head -1
+}
+
+find_research_pane() {
+  for pane_id in $(tmux list-panes -t "$SESSION" -F '#{pane_id}' 2>/dev/null); do
+    local role=$(tmux show-options -p -t "$pane_id" -v @role 2>/dev/null)
+    if [ "$role" = "research" ]; then
+      echo "$pane_id"
+      return
+    fi
+  done
+}
+
+open_in_tmux() {
+  local task_dir="$1"
+  local initial_prompt="$2"
+
+  local target=$(find_research_pane)
+  if [ -z "$target" ]; then
+    echo "No research pane found. Run: rq start"
+    return 1
+  fi
+
+  local content=$(tmux capture-pane -t "$target" -p 2>/dev/null | tr -d '[:space:]')
+  local new_pane
+  if [ -z "$content" ]; then
+    tmux send-keys -t "$target" "cd $task_dir" Enter
+    new_pane="$target"
+  else
+    new_pane=$(tmux split-window -t "$target" -c "$task_dir" -P -F '#{pane_id}')
+  fi
+
+  tmux set-option -p -t "$new_pane" @role research
+  tmux send-keys -t "$new_pane" "claude --dangerously-skip-permissions" Enter
+  sleep 2
+  tmux send-keys -t "$new_pane" "$initial_prompt" Enter
+}
+
+summarize_task() {
+  local num="$1"
+  local task_dir="$2"
+  local report="${task_dir}/${num}_report.md"
+
+  [ ! -f "$report" ] && return
+
+  local summary=$(claude --dangerously-skip-permissions --model claude-haiku-4-5-20251001 -p "
+Read this research report and output ONLY two lines:
+Line 1: A concise, descriptive title (max 60 chars)
+Line 2: A one-sentence summary of the key finding
+
+$(head -c 4000 "$report")
+" 2>/dev/null)
+
+  if [ -n "$summary" ]; then
+    local title=$(echo "$summary" | head -1)
+    local one_liner=$(echo "$summary" | sed -n '2p')
+
+    echo -e "# ${title}\n\n${one_liner}" > "${task_dir}/${num}_summary.md"
+
+    local escaped_title=$(echo "      -> ${title}: ${one_liner}" | sed 's/[&/\]/\\&/g')
+    flock "$TASKS_FILE" sed -i "/^\- \[x\] ${num} /a\\${escaped_title}" "$TASKS_FILE"
+
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [summary] #${num}: ${title}" >> "$LOG"
+  fi
+}
+
+# ─── Commands ────────────────────────────────────────────────────────────────
+
+cmd_init() {
+  mkdir -p "${BASE}/tasks" "${BASE}/shared/data" "${BASE}/rollups"
+  touch "${BASE}/batch.log"
+
+  if [ ! -f "$TASKS_FILE" ]; then
+    cat > "$TASKS_FILE" << 'TASKS'
+# Research Queue
+
+## Active
+
+## Suggested
+
+## Done
+TASKS
+    echo "Created $TASKS_FILE"
+  fi
+
+  if [ ! -f "$CLAUDE_MD" ]; then
+    cat > "$CLAUDE_MD" << 'CLAUDEMD'
+# Research Protocol
+
+You are a thorough research assistant managing structured research tasks.
+
+## Research Standards
+- Be thorough and evidence-based. Cite data sources.
+- Challenge assumptions. Flag where data is thin or uncertain.
+- Prioritize actionable insights over summaries.
+- When making empirical claims, cite scientific evidence.
+
+## File Conventions
+
+You are working in a task directory: `tasks/<NUM>_<slug>/`
+
+- **Prefix all files with your task number.** E.g. `001_research.ipynb`, `001_report.md`, `001_analysis.py`
+- **Notebook:** `<NUM>_research.ipynb` -- primary working notebook. Run cells as you go.
+- **Report:** `<NUM>_report.md` -- distilled findings when concluding. Include: summary, methodology, key findings, data gaps, next steps.
+- **Data:** `<NUM>_data/` -- pulled data, CSVs, intermediate outputs.
+- **Shared utilities:** `../../shared/utils.py` and `../../shared/data/`. Import via `sys.path.insert(0, '../../shared')`. If you write a reusable helper, add it to shared.
+
+## Suggesting Follow-Up Research
+
+When you identify promising follow-up directions, suggest them by running:
+
+```bash
+bash ~/claude-research/task.sh add "<clear research question>" "#a"
+```
+
+Use `#a` for: data pulls, comparisons, straightforward analyses -- reviewed later.
+Use `#i` for: exploratory questions, methodology decisions, judgment calls -- needs human steering.
+
+Frame suggestions as specific, actionable research questions -- not vague topics.
+
+## Cross-Task Research
+
+Prior task reports live in sibling directories under `tasks/`. Grep across them when prior findings are relevant:
+```bash
+grep -r "search term" ../../tasks/ --include="*.md"
+```
+
+## Environment Notes
+- Signal completion by printing TASK_COMPLETE on the final line of output.
+CLAUDEMD
+    echo "Created $CLAUDE_MD"
+  fi
+
+  echo ""
+  echo "Initialized: $BASE"
+  echo ""
+  echo "Optional: add hooks to ~/.claude/settings.json for tmux pane coloring:"
+  cat << 'HOOKS'
+  "hooks": {
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "tmux select-pane -P bg=default 2>/dev/null || true"}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "bash -c 'output=$(tmux capture-pane -p -S -5 2>/dev/null); if echo \"$output\" | grep -q TASK_COMPLETE; then tmux select-pane -P bg=colour22 2>/dev/null; else tmux select-pane -P bg=colour52 2>/dev/null; fi' || true"}]}]
+  }
+HOOKS
+}
+
+cmd_add() {
+  local text="$1"; local tag="${2:-#a}"
+  mkdir -p "$TASKS_DIR"
+  local num=$(next_number)
+  local dir=$(make_task_dir "$num" "$text")
+  flock "$TASKS_FILE" sed -i "/^## Suggested/a - [?] ${num} [$(ts)] ${text} ${tag}" "$TASKS_FILE"
+  echo "Suggested #${num}: ${text} ${tag}"
+  echo "  -> ${dir}"
+}
+
+cmd_idea() {
+  local text="$1"; local tag="${2:-#i}"
+  mkdir -p "$TASKS_DIR"
+  local num=$(next_number)
+  local dir=$(make_task_dir "$num" "$text")
+  flock "$TASKS_FILE" sed -i "/^## Active/a - [ ] ${num} [$(ts)] ${text} ${tag}" "$TASKS_FILE"
+  echo "Added #${num}: ${text} ${tag}"
+  echo "  -> ${dir}"
+}
+
+cmd_approve() {
+  if [ "${1:-}" = "all" ]; then
+    local lines=()
+    while IFS= read -r line; do
+      if [[ "$line" =~ ^\-\ \[\?\]\ ([0-9]{3})\  ]]; then
+        local num="${BASH_REMATCH[1]}"
+        local rest=$(echo "$line" | sed "s/^- \[?\] ${num} //")
+        local text=$(echo "$rest" | sed 's/ #[ai]$//' | sed 's/^\[[0-9-]*\] //')
+        [ -d "${TASKS_DIR}/${num}_"* ] 2>/dev/null || make_task_dir "$num" "$text" > /dev/null
+        lines+=("$(echo "$line" | sed 's/^- \[?\]/- [ ]/')")
+      fi
+    done < "$TASKS_FILE"
+    flock "$TASKS_FILE" bash -c '
+      sed -i "/^- \[?\]/d" "'"$TASKS_FILE"'"
+      for line in "$@"; do
+        escaped=$(echo "$line" | sed '\''s/[&/\]/\\&/g'\'')
+        sed -i "/^## Active/a\\${escaped}" "'"$TASKS_FILE"'"
+      done
+    ' -- "${lines[@]}"
+    echo "Approved all (${#lines[@]} tasks)."
+  else
+    local num="$1"
+    local task_line=$(grep -E -- "^- \[\?\] ${num} " "$TASKS_FILE" | head -1)
+    if [ -z "$task_line" ]; then
+      echo "No suggested task #${num}."
+    else
+      local approved_line=$(echo "$task_line" | sed 's/^- \[?\]/- [ ]/')
+      flock "$TASKS_FILE" awk -v num="$num" -v newline="$approved_line" '
+        /^- \[\?\] / && $0 ~ "^- \\[\\?\\] " num " " { next }
+        /^## Active$/ { print; print newline; next }
+        { print }
+      ' "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+      echo "Approved #${num}"
+    fi
+  fi
+}
+
+cmd_reject() {
+  local num="$1"
+  flock "$TASKS_FILE" sed -i "/^\- \[?\] ${num} /d" "$TASKS_FILE"
+  echo "Rejected #${num}"
+}
+
+cmd_archive() {
+  if ! grep -qF -- '- [x]' "$TASKS_FILE"; then
+    echo "Nothing to archive."
+  else
+    flock "$TASKS_FILE" awk '
+      /^- \[x\] /    { done[++n]=$0; skip=1; next }
+      skip && /^[[:space:]]+->/ { done[++n]=$0; next }
+      { skip=0 }
+      /^## Done$/    { print; for(i=1;i<=n;i++) print done[i]; next }
+      { print }
+    ' "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+    echo "Archived to ## Done."
+  fi
+}
+
+cmd_resume() {
+  local num="$1"
+  local task_dir=$(find_task_dir "$num")
+  if [ -z "$task_dir" ]; then
+    echo "No directory found for #${num}"
+    return 1
+  fi
+
+  flock "$TASKS_FILE" sed -i "s|^\- \[>\] ${num} |- [ ] ${num} |" "$TASKS_FILE"
+
+  local task_line=$(grep -E -- "^- \[.\] ${num} " "$TASKS_FILE" | head -1)
+  local task_desc=$(echo "$task_line" | sed -E 's/^- \[.\] [0-9]{3} \[[0-9-]+\] //' | sed 's/ #[ai]$//')
+
+  open_in_tmux "$task_dir" "Resume task #${num}: ${task_desc}. Check existing files in this directory for prior work and pick up where the previous session left off."
+  echo "Resumed #${num} -> ${task_dir}"
+}
+
+cmd_rerun() {
+  local num="$1"
+  flock "$TASKS_FILE" bash -c "
+    sed -i 's/^- \[.\] ${num} /- [ ] ${num} /' \"$TASKS_FILE\"
+    sed -i 's/\(^- \[ \] ${num} .*\) #i$/\1 #a/' \"$TASKS_FILE\"
+  "
+  echo "Queued #${num} for rerun (next launch)."
+}
+
+cmd_research() {
+  local text="$1"
+  local num tag dir task_dir
+
+  mkdir -p "$TASKS_DIR"
+  num=$(next_number)
+  dir=$(make_task_dir "$num" "$text")
+  flock "$TASKS_FILE" sed -i "/^## Active/a - [ ] ${num} [$(ts)] ${text} #i" "$TASKS_FILE"
+
+  open_in_tmux "$dir" "Research task #${num}: ${text}"
+  echo "Opened #${num} -> ${dir}"
+}
+
+cmd_launch() {
+  local preamble=$(cat "$CLAUDE_MD" 2>/dev/null || echo "")
+  local count=0
+  local self="$0"
+
+  while IFS= read -r line; do
+    [[ ! "$line" =~ ^\-\ \[\ \]\ ([0-9]{3})\ \[[0-9]{4}-[0-9]{2}-[0-9]{2}\]\ (.+)\ \#a$ ]] && continue
+    local num="${BASH_REMATCH[1]}"
+    local task="${BASH_REMATCH[2]}"
+
+    local task_dir=$(find_task_dir "$num")
+    if [ -z "$task_dir" ]; then
+      local slug=$(echo "$task" | tr '[:upper:]' '[:lower:]' | tr ' ' '_' | tr -cd '[:alnum:]_' | head -c 40)
+      task_dir="${TASKS_DIR}/${num}_${slug}"
+      mkdir -p "${task_dir}/${num}_data"
+    fi
+
+    while [ "$(jobs -rp | wc -l)" -ge "$MAX_JOBS" ]; do
+      wait -n
+    done
+
+    flock "$TASKS_FILE" sed -i "s|^\- \[ \] ${num} |- [>] ${num} |" "$TASKS_FILE"
+
+    (
+      echo "$(date '+%Y-%m-%d %H:%M:%S') [start] #${num}: ${task}" >> "$LOG"
+
+      cd "$task_dir"
+      claude --dangerously-skip-permissions -p "${preamble}
+
+TASK #${num}: ${task}
+
+Working directory: ${task_dir}
+Shared utilities: ${BASE}/shared/
+
+File naming: prefix all files with ${num}_ (e.g. ${num}_research.ipynb, ${num}_report.md)
+Data subdirectory: ${num}_data/
+
+When identifying follow-up research directions, suggest them by running:
+bash ${self} add \"<clear research question>\" \"#a\"
+
+Write your full findings to ${num}_report.md in this directory.
+When finished, print TASK_COMPLETE as the last line of output.
+" > "${task_dir}/${num}_output.log" 2>&1
+
+      flock "$TASKS_FILE" sed -i "s|^\- \[>\] ${num} |- [x] ${num} |" "$TASKS_FILE"
+      echo "$(date '+%Y-%m-%d %H:%M:%S') [done] #${num}" >> "$LOG"
+
+      summarize_task "$num" "$task_dir"
+      bash "$self" archive > /dev/null 2>&1
+    ) &
+
+    echo "[launch] #${num}: ${task} (PID $!)"
+    ((count++))
+  done < "$TASKS_FILE"
+
+  if [ "$count" -eq 0 ]; then
+    echo "No approved #a tasks." | tee -a "$LOG"
+  else
+    echo "Launched ${count} tasks." | tee -a "$LOG"
+  fi
+}
+
+cmd_start() {
+  tmux kill-session -t "$SESSION" 2>/dev/null
+  touch "$LOG"
+
+  tmux new-session -d -s "$SESSION" -n "research" -c "$BASE"
+
+  tmux split-window -t "$SESSION" -h -l 25% -c "$BASE"
+
+  tmux send-keys -t "$SESSION.1" "watch -n 2 '
+    running=\$(grep -cF -- \"- [>]\" tasks.md 2>/dev/null || echo 0)
+    queued=\$(grep -cF -- \"- [ ]\" tasks.md 2>/dev/null || echo 0)
+    done=\$(grep -cF -- \"- [x]\" tasks.md 2>/dev/null || echo 0)
+    suggested=\$(grep -cF -- \"- [?]\" tasks.md 2>/dev/null || echo 0)
+    printf \"[R] %s run | [Q] %s queue | [D] %s done | [S] %s new\\n\\n\" \$running \$queued \$done \$suggested
+    sed \"/^## Done/,\\\$d\" tasks.md
+  '" Enter
+
+  tmux split-window -t "$SESSION.1" -v -l 66% -c "$BASE"
+  tmux send-keys -t "$SESSION.2" "watch -n 5 'echo \"=== Recent Reports ===\"; echo; find tasks/ -name \"*_report.md\" -printf \"%T@ %Tc  %p\n\" 2>/dev/null | sort -rn | head -15 | cut -d\" \" -f2-'" Enter
+
+  tmux split-window -t "$SESSION.2" -v -l 50% -c "$BASE"
+  tmux send-keys -t "$SESSION.3" "tail -f $LOG" Enter
+
+  tmux set-option -p -t "$SESSION.0" @role research
+  tmux set-option -p -t "$SESSION.1" @role monitor
+  tmux set-option -p -t "$SESSION.2" @role monitor
+  tmux set-option -p -t "$SESSION.3" @role monitor
+
+  tmux select-pane -t "$SESSION.0"
+  tmux attach -t "$SESSION"
+}
+
+cmd_report() {
+  local num="$1"
+  local f=$(find "$TASKS_DIR" -name "${num}_report.md" 2>/dev/null | head -1)
+  if [ -n "$f" ]; then
+    cat "$f"
+  else
+    echo "No report for #${num}"
+  fi
+}
+
+cmd_rgrep() {
+  grep -rn --include="*.md" --include="*.py" --include="*.ipynb" "$@" "$TASKS_DIR/"
+}
+
+cmd_rollup() {
+  local day="${1:-$(date +%Y-%m-%d)}"
+  echo "=== Research Rollup: ${day} ==="
+  echo ""
+  grep "\[${day}" "$TASKS_FILE" | while IFS= read -r line; do
+    echo "$line"
+  done
+  echo ""
+  echo "Reports completed:"
+  find "$TASKS_DIR" -name "*_report.md" -newermt "$day 00:00" ! -newermt "$day 23:59:59" 2>/dev/null | while read -r f; do
+    echo "  $f"
+  done
+}
+
+cmd_daily() {
+  local day="${1:-$(date +%Y-%m-%d)}"
+  local rollup_file="${BASE}/rollups/${day}.md"
+  mkdir -p "${BASE}/rollups"
+
+  local reports=""
+  for f in $(find "$TASKS_DIR" -name "*_summary.md" -newermt "$day 00:00" ! -newermt "$day 23:59:59" 2>/dev/null); do
+    reports+="$(cat "$f")"$'\n\n'
+  done
+
+  if [ -z "$reports" ]; then
+    echo "No completed research for ${day}."
+    return
+  fi
+
+  claude --dangerously-skip-permissions --model claude-haiku-4-5-20251001 -p "
+Write a concise daily research rollup for ${day}. Group by theme. Highlight key findings and open questions.
+
+Completed research summaries:
+${reports}
+
+Task queue status:
+$(grep "\[${day}" "$TASKS_FILE")
+" > "$rollup_file"
+
+  echo "Rollup -> ${rollup_file}"
+  cat "$rollup_file"
+}
+
+# ─── Dispatch ────────────────────────────────────────────────────────────────
+
+case "${1:-help}" in
+  init)                cmd_init ;;
+  add)       shift;    cmd_add "$@" ;;
+  idea)      shift;    cmd_idea "$@" ;;
+  approve)   shift;    cmd_approve "$@" ;;
+  reject)    shift;    cmd_reject "$@" ;;
+  list)                cat "$TASKS_FILE" ;;
+  suggested)           grep -F -- '- [?]' "$TASKS_FILE" || echo "No pending suggestions." ;;
+  running)             grep -F -- '- [>]' "$TASKS_FILE" || echo "Nothing running." ;;
+  stuck)               grep -F -- '- [>]' "$TASKS_FILE" || echo "No stuck tasks." ;;
+  dir)       shift;    find_task_dir "$1" ;;
+  archive)             cmd_archive ;;
+  resume)    shift;    cmd_resume "$@" ;;
+  rerun)     shift;    cmd_rerun "$@" ;;
+  launch)              cmd_launch ;;
+  start)               cmd_start ;;
+  research)  shift;    cmd_research "$@" ;;
+  report)    shift;    cmd_report "$@" ;;
+  rgrep)     shift;    cmd_rgrep "$@" ;;
+  rollup)    shift;    cmd_rollup "$@" ;;
+  daily)     shift;    cmd_daily "$@" ;;
+  help|*)
+    echo "rq -- research queue for Claude CLI"
+    echo ""
+    echo "Setup:    rq init"
+    echo "Tmux:     rq start"
+    echo ""
+    echo "Tasks:    rq idea \"question\"         add interactive task (#i)"
+    echo "          rq idea \"question\" \"#a\"    add auto task"
+    echo "          rq add \"question\"           suggest auto task (#a)"
+    echo "          rq approve 003 | all        approve suggestions"
+    echo "          rq reject 003               remove suggestion"
+    echo ""
+    echo "Run:      rq launch                   run all #a tasks"
+    echo "          rq research \"question\"      open interactive tmux pane"
+    echo "          rq resume 003               resume stuck task in tmux"
+    echo "          rq rerun 003                requeue for next launch"
+    echo ""
+    echo "View:     rq list                     full task queue"
+    echo "          rq suggested                pending suggestions"
+    echo "          rq stuck                    tasks stuck in [>]"
+    echo "          rq report 003               print task report"
+    echo "          rq rgrep \"term\"             search all research"
+    echo "          rq rollup [date]            quick summary"
+    echo "          rq daily [date]             Haiku-generated rollup"
+    echo ""
+    echo "Manage:   rq archive                  move [x] to ## Done"
+    ;;
+esac
