@@ -1,0 +1,24 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "tmux select-pane -P bg=default 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'output=$(tmux capture-pane -p -S -5 2>/dev/null); if echo \"$output\" | grep -q TASK_COMPLETE; then tmux select-pane -P bg=colour22 2>/dev/null; else tmux select-pane -P bg=colour52 2>/dev/null; fi' || true"
+          }
+        ]
+      }
+    ]
+  }
+}
