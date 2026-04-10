@@ -11,9 +11,10 @@ alias launch="bash $CLAUDE_RESEARCH_DIR/launch.sh"
 alias rollup="bash $CLAUDE_RESEARCH_DIR/task.sh rollup"
 alias archive="bash $CLAUDE_RESEARCH_DIR/task.sh archive"
 alias stuck="bash $CLAUDE_RESEARCH_DIR/task.sh stuck"
+alias rerun="bash $CLAUDE_RESEARCH_DIR/task.sh rerun"
 
 function idea -d "Add an interactive research task"
-    set -l tag (test -n "$argv[2]" && echo "$argv[2]" || echo "#interactive")
+    set -l tag (test -n "$argv[2]" && echo "$argv[2]" || echo "#i")
     bash "$CLAUDE_RESEARCH_DIR/task.sh" add-active "$argv[1]" "$tag"
 end
 
@@ -33,7 +34,7 @@ end
 
 function research -d "Open an interactive research session in tmux"
     set -l text "$argv[1]"
-    set -l output (bash "$CLAUDE_RESEARCH_DIR/task.sh" add-active "$text" "#interactive")
+    set -l output (bash "$CLAUDE_RESEARCH_DIR/task.sh" add-active "$text" "#i")
     set -l num (echo "$output" | grep -oP '#\K[0-9]{3}')
     set -l task_dir (bash "$CLAUDE_RESEARCH_DIR/task.sh" dir "$num")
 

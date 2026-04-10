@@ -10,9 +10,10 @@ alias launch="bash $CLAUDE_RESEARCH_DIR/launch.sh"
 alias rollup="bash $CLAUDE_RESEARCH_DIR/task.sh rollup"
 alias archive="bash $CLAUDE_RESEARCH_DIR/task.sh archive"
 alias stuck="bash $CLAUDE_RESEARCH_DIR/task.sh stuck"
+alias rerun="bash $CLAUDE_RESEARCH_DIR/task.sh rerun"
 
 idea() {
-  bash "$CLAUDE_RESEARCH_DIR/task.sh" add-active "$1" "${2:-#interactive}"
+  bash "$CLAUDE_RESEARCH_DIR/task.sh" add-active "$1" "${2:-#i}"
 }
 
 rgrep() {
@@ -32,7 +33,7 @@ _find_research_pane() {
 research() {
   local text="$1"
   local output
-  output=$(bash "$CLAUDE_RESEARCH_DIR/task.sh" add-active "$text" "#interactive")
+  output=$(bash "$CLAUDE_RESEARCH_DIR/task.sh" add-active "$text" "#i")
   local num=$(echo "$output" | grep -oP '#\K[0-9]{3}')
   local task_dir=$(bash "$CLAUDE_RESEARCH_DIR/task.sh" dir "$num")
 

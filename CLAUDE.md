@@ -20,18 +20,14 @@ You are working in a task directory: `tasks/<NUM>_<slug>/`
 
 ## Suggesting Follow-Up Research
 
-When you identify promising follow-up directions, append to the task queue:
+When you identify promising follow-up directions, suggest them by running:
 
 ```bash
-flock ~/claude-research/tasks.md bash -c '
-  num=$(printf "%03d" $(( $(grep -oP "^- \[.\] \K[0-9]{3}" ~/claude-research/tasks.md | sort -n | tail -1 | sed "s/^0*//") + 1 )))
-  ts=$(date +"%Y-%m-%d")
-  echo "- [?] ${num} [${ts}] <clear research question> #auto" >> ~/claude-research/tasks.md
-'
+bash ~/claude-research/task.sh add "<clear research question>" "#a"
 ```
 
-Use `#auto` for: data pulls, comparisons, straightforward analyses.
-Use `#interactive` for: exploratory questions, methodology decisions, judgment calls.
+Use `#a` for: data pulls, comparisons, straightforward analyses — reviewed later.
+Use `#i` for: exploratory questions, methodology decisions, judgment calls — needs human steering.
 
 Frame suggestions as specific, actionable research questions — not vague topics.
 

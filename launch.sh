@@ -6,6 +6,8 @@ TASKS_DIR="${BASE}/tasks"
 CLAUDE_MD="${BASE}/CLAUDE.md"
 LOG="${BASE}/batch.log"
 
+MAX_JOBS="${MAX_JOBS:-4}"
+
 preamble=$(cat "$CLAUDE_MD" 2>/dev/null || echo "")
 
 # Summarize a completed task using a fast model
@@ -42,7 +44,7 @@ $(head -c 4000 "$report")
 
 count=0
 while IFS= read -r line; do
-  [[ ! "$line" =~ ^\-\ \[\ \]\ ([0-9]{3})\ \[[0-9]{4}-[0-9]{2}-[0-9]{2}\]\ (.+)\ \#auto$ ]] && continue
+  [[ ! "$line" =~ ^\-\ \[\ \]\ ([0-9]{3})\ \[[0-9]{4}-[0-9]{2}-[0-9]{2}\]\ (.+)\ \#a$ ]] && continue
   num="${BASH_REMATCH[1]}"
   task="${BASH_REMATCH[2]}"
 
@@ -52,6 +54,11 @@ while IFS= read -r line; do
     task_dir="${TASKS_DIR}/${num}_${slug}"
     mkdir -p "${task_dir}/${num}_data"
   fi
+
+  # Throttle: wait for a slot if at max concurrency
+  while [ "$(jobs -rp | wc -l)" -ge "$MAX_JOBS" ]; do
+    wait -n
+  done
 
   flock "$TASKS_FILE" sed -i "s|^\- \[ \] ${num} |- [>] ${num} |" "$TASKS_FILE"
 
@@ -69,8 +76,8 @@ Shared utilities: ${BASE}/shared/
 File naming: prefix all files with ${num}_ (e.g. ${num}_research.ipynb, ${num}_report.md)
 Data subdirectory: ${num}_data/
 
-When identifying follow-up research directions, append to ${TASKS_FILE}:
-flock ${TASKS_FILE} bash -c 'num=\$(printf \"%03d\" \$(( \$(grep -oP \"^- \\[.\\] \\K[0-9]{3}\" ${TASKS_FILE} | sort -n | tail -1 | sed \"s/^0*//\") + 1 ))); ts=\$(date +\"%Y-%m-%d\"); echo \"- [?] \${num} [\${ts}] <research question> #auto\" >> ${TASKS_FILE}'
+When identifying follow-up research directions, suggest them by running:
+bash ${BASE}/task.sh add \"<clear research question>\" \"#a\"
 
 Write your full findings to ${num}_report.md in this directory.
 When finished, print TASK_COMPLETE as the last line of output.
@@ -91,7 +98,7 @@ When finished, print TASK_COMPLETE as the last line of output.
 done < "$TASKS_FILE"
 
 if [ "$count" -eq 0 ]; then
-  echo "No approved #auto tasks." | tee -a "$LOG"
+  echo "No approved #a tasks." | tee -a "$LOG"
 else
   echo "Launched ${count} tasks." | tee -a "$LOG"
 fi

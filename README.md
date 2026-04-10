@@ -28,7 +28,7 @@ bash ~/claude-research/start.sh
 
 # Add ideas throughout the day
 idea "analyze latency patterns in production logs"
-idea "pull quarterly metrics from dashboard" "#auto"
+idea "pull quarterly metrics from dashboard" "#a"
 
 # Review Claude's suggestions
 suggested
@@ -36,7 +36,7 @@ approve 003
 approve all
 reject 005
 
-# Launch all approved #auto tasks in parallel
+# Launch all approved #a tasks in parallel
 launch
 
 # Open interactive research session in tmux
@@ -63,19 +63,20 @@ archive
 
 There are two kinds of tasks:
 
-- **`#auto` (batch)** -- tasks Claude can complete without your input. Data pulls,
+- **`#i` (interactive)** -- you're driving. Opens a live Claude session in a tmux
+  pane where you collaborate in real time. Use `idea "question"` or
+  `research "question"` to create these. Default for `idea` and `research`.
+
+- **`#a` (auto)** -- Claude does its thing, you review later. Data pulls,
   comparisons, straightforward analyses. You queue them up, run `launch`, and they
-  execute in parallel in the background. Each one gets a report and a Haiku-generated
-  summary. Use `task add` or `idea "question" "#auto"` to create these.
+  execute in the background (up to 4 at a time). Each produces a report and a
+  Haiku-generated summary. Use `task add "question"` or `idea "question" "#a"`.
 
-- **`#interactive` (live)** -- tasks that need your judgment. Exploratory questions,
-  methodology decisions, anything where you want to steer. These open a live Claude
-  session in a tmux pane where you collaborate in real time. Use `idea "question"` or
-  `research "question"` to create and immediately open these.
+Both produce the same outputs (reports, logs, summaries). The difference is when
+you pay attention -- now or later.
 
-Claude itself can suggest follow-up tasks (tagged `#auto` or `#interactive`) during
-any session. These appear as `[?] Suggested` for you to approve or reject before
-they run.
+Claude can suggest follow-up tasks (tagged `#a` or `#i`) during any session. These
+appear as `[?] Suggested` for you to approve or reject before they run.
 
 ## Task Lifecycle
 
@@ -105,13 +106,14 @@ idea / task add          task add-active
 
 | Command | Action |
 |---------|--------|
-| `idea "question"` | Add to active queue (#interactive default) |
-| `idea "question" "#auto"` | Add as batch task |
-| `task add "question"` | Add to suggested queue (#auto default) |
+| `idea "question"` | Add to active queue (#i default) |
+| `idea "question" "#a"` | Add as auto task |
+| `task add "question"` | Add to suggested queue (#a default) |
 | `approve 003` / `approve all` | Approve suggestions -> active |
 | `reject 005` | Remove suggestion |
 | `suggested` | List pending suggestions |
-| `launch` | Run all approved #auto tasks in parallel |
+| `launch` | Run all approved #a tasks in parallel |
+| `rerun 003` | Reset task to [ ] #a for next launch |
 | `research "question"` | Open interactive tmux pane |
 | `resume 003` | Resume stuck/incomplete task |
 | `stuck` | List tasks stuck in [>] state |
@@ -125,8 +127,8 @@ idea / task add          task add-active
 ## Task Format
 
 ```
-- [?] 003 [2026-04-10] Compare caching strategies across services #auto
-- [x] 001 [2026-04-10] Analyze production latency patterns #auto
+- [?] 003 [2026-04-10] Compare caching strategies across services #a
+- [x] 001 [2026-04-10] Analyze production latency patterns #a
       -> Latency Hotspots: P99 latency driven by cold cache misses in auth service
 ```
 
@@ -134,8 +136,8 @@ idea / task add          task add-active
 
 | Tag | Meaning |
 |-----|---------|
-| `#auto` | Batch task -- launched by `launch`, runs unattended |
-| `#interactive` | Live session -- opened by `research`, expects human input |
+| `#a` | Auto -- Claude works, you review later. Launched by `launch` |
+| `#i` | Interactive -- you're driving. Opened by `research` |
 
 ## File Structure
 

@@ -31,7 +31,7 @@ make_task_dir() {
 case "${1:-list}" in
   add)
     shift
-    text="$1"; tag="${2:-#auto}"
+    text="$1"; tag="${2:-#a}"
     num=$(next_number)
     dir=$(make_task_dir "$num" "$text")
     flock "$TASKS_FILE" sed -i "/^## Suggested/a - [?] ${num} [$(ts)] ${text} ${tag}" "$TASKS_FILE"
@@ -41,7 +41,7 @@ case "${1:-list}" in
 
   add-active)
     shift
-    text="$1"; tag="${2:-#interactive}"
+    text="$1"; tag="${2:-#i}"
     num=$(next_number)
     dir=$(make_task_dir "$num" "$text")
     flock "$TASKS_FILE" sed -i "/^## Active/a - [ ] ${num} [$(ts)] ${text} ${tag}" "$TASKS_FILE"
@@ -74,16 +74,19 @@ case "${1:-list}" in
       echo "Approved all (${#lines[@]} tasks)."
     else
       num="$1"
-      flock "$TASKS_FILE" bash -c "
-        sed -i 's/^- \[?\] ${num} /- [ ] ${num} /' \"$TASKS_FILE\"
-        line=\$(grep -F '- [ ] ${num} ' \"$TASKS_FILE\" | head -1)
-        if [ -n \"\$line\" ]; then
-          sed -i \"/^- \[ \] ${num} /d\" \"$TASKS_FILE\"
-          escaped=\$(echo \"\$line\" | sed 's/[&/\\\\]/\\\\&/g')
-          sed -i \"/^## Active/a\\\\\${escaped}\" \"$TASKS_FILE\"
-        fi
-      "
-      echo "Approved #${num}"
+      # First pass: extract the line. Second pass: move it.
+      task_line=$(grep -E -- "^- \[\?\] ${num} " "$TASKS_FILE" | head -1)
+      if [ -z "$task_line" ]; then
+        echo "No suggested task #${num}."
+      else
+        approved_line=$(echo "$task_line" | sed 's/^- \[?\]/- [ ]/')
+        flock "$TASKS_FILE" awk -v num="$num" -v newline="$approved_line" '
+          /^- \[\?\] / && $0 ~ "^- \\[\\?\\] " num " " { next }
+          /^## Active$/ { print; print newline; next }
+          { print }
+        ' "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+        echo "Approved #${num}"
+      fi
     fi
     ;;
 
@@ -141,6 +144,16 @@ case "${1:-list}" in
     echo "  -> ${task_dir}"
     ;;
 
+  rerun)
+    shift; num="$1"
+    # Reset any state back to [ ] and ensure #a tag for next launch
+    flock "$TASKS_FILE" bash -c "
+      sed -i 's/^- \[.\] ${num} /- [ ] ${num} /' \"$TASKS_FILE\"
+      sed -i 's/\(^- \[ \] ${num} .*\) #i$/\1 #a/' \"$TASKS_FILE\"
+    "
+    echo "Queued #${num} for rerun (next launch)."
+    ;;
+
   rollup)
     shift
     day="${1:-$(date +%Y-%m-%d)}"
@@ -158,6 +171,6 @@ case "${1:-list}" in
     ;;
 
   *)
-    echo "Usage: task {add|add-active|approve|reject|list|suggested|running|stuck|resume|archive|dir|rollup} [args]"
+    echo "Usage: task {add|add-active|approve|reject|list|suggested|running|stuck|resume|rerun|archive|dir|rollup} [args]"
     ;;
 esac
